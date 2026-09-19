@@ -10,70 +10,20 @@ import { CreateAppointmentDto } from './dto/create-appointment.dto';
 import { QueryAvailabilityDto } from './dto/query-availability.dto';
 import { UpdateAppointmentStatusDto } from './dto/update-appointment-status.dto';
 import { AppointmentStatus } from '@prisma/client';
+import {
+  dateFromMinutes,
+  formatMinutesToTime,
+  getTimezoneDetails,
+} from './helpers/appointment-time.helper';
 
 @Injectable()
 export class AppointmentsService {
-  // Zona horaria por defecto de la barbería (Colombia UTC-5)
   private readonly timezone = process.env.TIMEZONE || 'America/Bogota';
 
   constructor(
     private readonly prisma: PrismaService,
     private readonly clientsService: ClientsService,
   ) {}
-
-  /**
-   * Helper para obtener el día de la semana (0=Domingo..6=Sábado) y minutos desde medianoche
-   * en la zona horaria del negocio.
-   */
-  private getTimezoneDetails(date: Date) {
-    const formatter = new Intl.DateTimeFormat('en-US', {
-      timeZone: this.timezone,
-      weekday: 'short',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: false,
-    });
-
-    const parts = formatter.formatToParts(date);
-    const getPart = (type: string) => parts.find((p) => p.type === type)?.value || '';
-
-    const weekdayStr = getPart('weekday');
-    const hour = parseInt(getPart('hour'), 10);
-    const minute = parseInt(getPart('minute'), 10);
-
-    const weekdaysMap: Record<string, number> = {
-      Sun: 0,
-      Mon: 1,
-      Tue: 2,
-      Wed: 3,
-      Thu: 4,
-      Fri: 5,
-      Sat: 6,
-    };
-
-    const dayOfWeek = weekdaysMap[weekdayStr] ?? date.getDay();
-    const minuteOfDay = hour * 60 + minute;
-
-    return { dayOfWeek, minuteOfDay };
-  }
-
-  /**
-   * Helper para convertir fecha 'YYYY-MM-DD' y minutos desde medianoche a objeto Date
-   */
-  private dateFromMinutes(dateStr: string, minutes: number): Date {
-    const [year, month, day] = dateStr.split('-').map(Number);
-    const hours = Math.floor(minutes / 60);
-    const mins = minutes % 60;
-
-    // Formatear como ISO con offset de Colombia (-05:00)
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const isoString = `${year}-${pad(month)}-${pad(day)}T${pad(hours)}:${pad(mins)}:00-05:00`;
-    return new Date(isoString);
-  }
 
   async create(dto: CreateAppointmentDto) {
     // 1. Validar barbero
@@ -139,7 +89,7 @@ export class AppointmentsService {
     const endTime = new Date(startTime.getTime() + service.duration * 60000);
 
     // 6. Validar horario de trabajo del barbero
-    const { dayOfWeek, minuteOfDay: startMinute } = this.getTimezoneDetails(startTime);
+    const { dayOfWeek, minuteOfDay: startMinute } = getTimezoneDetails(startTime, this.timezone);
     const endMinute = startMinute + service.duration;
 
     const schedules = await this.prisma.barberSchedule.findMany({
@@ -229,8 +179,8 @@ export class AppointmentsService {
     }
 
     // Obtener día de la semana para la fecha consultada (ej. '2026-09-15')
-    const sampleDate = this.dateFromMinutes(date, 720); // Mediodía
-    const { dayOfWeek } = this.getTimezoneDetails(sampleDate);
+    const sampleDate = dateFromMinutes(date, 720); // Mediodía
+    const { dayOfWeek } = getTimezoneDetails(sampleDate, this.timezone);
 
     // Obtener horarios laborales del barbero ese día
     const schedules = await this.prisma.barberSchedule.findMany({
@@ -250,8 +200,8 @@ export class AppointmentsService {
     }
 
     // Definir límites del día para buscar citas
-    const dayStart = this.dateFromMinutes(date, 0);
-    const dayEnd = this.dateFromMinutes(date, 1440);
+    const dayStart = dateFromMinutes(date, 0);
+    const dayEnd = dateFromMinutes(date, 1440);
 
     const existingAppointments = await this.prisma.appointment.findMany({
       where: {
@@ -277,8 +227,8 @@ export class AppointmentsService {
         minute + duration <= schedule.endMinute;
         minute += step
       ) {
-        const slotStart = this.dateFromMinutes(date, minute);
-        const slotEnd = this.dateFromMinutes(date, minute + duration);
+        const slotStart = dateFromMinutes(date, minute);
+        const slotEnd = dateFromMinutes(date, minute + duration);
 
         // Verificar si se solapa con alguna cita existente
         const hasCollision = existingAppointments.some((app) => {
@@ -286,13 +236,8 @@ export class AppointmentsService {
         });
 
         if (!hasCollision) {
-          const hour = Math.floor(minute / 60);
-          const min = minute % 60;
-          const pad = (n: number) => String(n).padStart(2, '0');
-          const timeFormatted = `${pad(hour)}:${pad(min)}`;
-
           availableSlots.push({
-            time: timeFormatted,
+            time: formatMinutesToTime(minute),
             startTime: slotStart.toISOString(),
             endTime: slotEnd.toISOString(),
             minute,
